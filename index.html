@@ -1,10 +1,11 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>低频噪音分析器 + 热力图</title>
-  <style>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>低频噪音分析器 + 热力图</title>
+<style>
     body { background: #111; color: #fff; font-family: sans-serif; text-align: center; margin: 0; }
     canvas { background: #000; display: block; margin: 0 auto; }
     .controls { margin-top: 10px; }
@@ -17,16 +18,17 @@
   </style>
 </head>
 <body>
-  <h1>🎧 高频谱 + 热力图分析器（低频专用）</h1>
-  <canvas id="spectrumCanvas" width="1024" height="400"></canvas>
-  <canvas id="heatmapCanvas" width="1024" height="200"></canvas>
-  <div class="controls">
-    <button id="toggleBtn">▶️ 开始</button>
-    <button id="toggleModeBtn">📊 切换柱状/曲线</button>
-    <button id="toggleScaleBtn">📉 切换线性/对数 X轴</button>
-    <button id="clearBtn">🧹 清空热力图</button>
-  </div>
-  <script>
+<h1>🎧 高频谱 + 热力图分析器（低频专用）</h1>
+<div class="controls">
+<button id="toggleBtn">▶️ 开始</button>
+<button id="toggleModeBtn">📊 切换柱状/曲线</button>
+<button id="toggleScaleBtn">📉 切换线性/对数 X轴</button>
+<button id="clearBtn">🧹 清空热力图</button>
+<!-- <button id="toggleBandBtn">🔁 切换频率范围</button> -->
+</div>
+<canvas height="200" id="spectrumCanvas" width="600"></canvas>
+<canvas height="400" id="heatmapCanvas" width="600"></canvas>
+<script>
     const specCanvas = document.getElementById("spectrumCanvas");
     const specCtx = specCanvas.getContext("2d");
     const heatCanvas = document.getElementById("heatmapCanvas");
@@ -36,8 +38,8 @@
     let bufferLength, sampleRate;
     let floatData, avgData;
     let isPaused = true;
-    let isLogScale = false;
-    let useBarChart = true;
+    let isLogScale = true;
+    let useBarChart = false;
     let animationId;
     const smoothingFactor = 0.8;
     const heatHistory = [];
@@ -63,6 +65,52 @@
       }
       return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
     }
+
+	function drawTop3LabelsAndMarkers(top3, ctx, canvas, sampleRate, bufferLength, isLogScale) {
+	  const colors = ['#ff0', '#0ff', '#f0f']; // 黄、青、紫
+	  const barWidth = canvas.width / bufferLength;
+
+	  // 设置右上角文字样式
+	  ctx.font = "14px sans-serif";
+	  ctx.textAlign = "right";
+	  ctx.textBaseline = "top";
+
+	  top3.forEach((peak, i) => {
+		const freq = peak.index * sampleRate / 2 / bufferLength;
+		const dB = peak.value;
+
+		// 显示右上角文本
+		ctx.fillStyle = colors[i];
+		ctx.fillText(`${i + 1}. ${freq.toFixed(1)} Hz / ${dB.toFixed(1)} dB`, canvas.width - 10, 10 + i * 18);
+		
+		// 计算图中坐标
+		const x = isLogScale
+		  ? Math.log10(1 + peak.index) / Math.log10(1 + bufferLength) * canvas.width
+		  : peak.index * barWidth;
+		const y = canvas.height - ((dB + 120) / 120) * canvas.height;
+
+		// 圆点标注
+		ctx.beginPath();
+		ctx.arc(x, y, 4, 0, 2 * Math.PI);
+		ctx.fill();
+		
+
+		if (i === 0) {
+		// 数值注释
+		ctx.fillStyle = colors[i];
+		ctx.textAlign = "center";
+		ctx.fillText(`${Math.round(freq)}Hz ${dB.toFixed(1)}dB`, x, y - 20);
+		}
+
+		ctx.textAlign = "right";
+		
+	  });
+	}
+
+
+
+
+
 
     function draw() {
       if (isPaused) return;
@@ -129,29 +177,17 @@
           ? Math.log10(1 + bin) / Math.log10(1 + bufferLength) * specCanvas.width
           : norm * specCanvas.width;
         specCtx.beginPath();
-        specCtx.moveTo(x, specCanvas.height - 10);
+        specCtx.moveTo(x, specCanvas.height - 400);
         specCtx.lineTo(x, specCanvas.height);
         specCtx.stroke();
-        specCtx.fillText(`${freq}Hz`, x + 2, specCanvas.height - 5);
+        specCtx.fillText(`${freq}Hz`, x + 2, specCanvas.height - 10);
       });
-
       // Top3 peaks
       peaks.sort((a, b) => b.value - a.value);
       const top3 = peaks.slice(0, 3);
-      specCtx.fillStyle = "#ff0";
-      specCtx.font = "14px sans-serif";
-      top3.forEach(peak => {
-        const freq = peak.index * sampleRate / 2 / bufferLength;
-        const dB = peak.value;
-        const x = isLogScale
-          ? Math.log10(1 + peak.index) / Math.log10(1 + bufferLength) * specCanvas.width
-          : peak.index * barWidth;
-        const y = specCanvas.height - ((dB + 120) / 120) * specCanvas.height;
-        specCtx.beginPath();
-        specCtx.arc(x, y, 4, 0, 2 * Math.PI);
-        specCtx.fill();
-        specCtx.fillText(`🔺${Math.round(freq)}Hz ${dB.toFixed(1)}dB`, x + 6, y - 6);
-      });
+
+		// 标记 top3
+		drawTop3LabelsAndMarkers(top3, specCtx, specCanvas, sampleRate, bufferLength, isLogScale);
 
       // 热力图更新
       const row = new Uint8ClampedArray(bufferLength * 4);
@@ -184,6 +220,7 @@
           imageData.data[pixelIndex + 3] = 255;
         }
       }
+      <!-- heatCtx.putImageData(imageData, 0, 0); -->
       heatCtx.putImageData(imageData, 0, heatCanvas.height - heatHistory.length);
     }
 
