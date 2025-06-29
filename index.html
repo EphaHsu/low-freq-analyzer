@@ -1,289 +1,222 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>低频噪音分析器（压缩机 & HVAC）</title>
+  <title>低频噪音分析器 + 热力图</title>
   <style>
-    body {
-      background: #111;
-      color: #fff;
-      font-family: sans-serif;
-      text-align: center;
-      margin: 0;
-    }
-    canvas {
-      background: #000;
-      display: block;
-      margin: 0 auto;
-    }
-    .controls {
-      margin-top: 10px;
-    }
-    .meter {
-      width: 300px;
-      height: 20px;
-      background: #333;
-      margin: 1rem auto;
-      position: relative;
-      border-radius: 5px;
-    }
-    .meter-fill {
-      height: 100%;
-      background: limegreen;
-      transition: width 0.1s;
-      border-radius: 5px;
-    }
-    .volume-label {
-      font-size: 14px;
-      margin-top: 5px;
-    }
+    body { background: #111; color: #fff; font-family: sans-serif; text-align: center; margin: 0; }
+    canvas { background: #000; display: block; margin: 0 auto; }
+    .controls { margin-top: 10px; }
     button {
-      margin: 0.5rem;
-      padding: 0.5rem 1rem;
-      background: #333;
-      color: #fff;
-      border: none;
-      cursor: pointer;
-      border-radius: 5px;
+      margin: 0.5rem; padding: 0.5rem 1rem;
+      background: #333; color: #fff; border: none;
+      cursor: pointer; border-radius: 5px;
     }
-    button:hover {
-      background: #555;
-    }
+    button:hover { background: #555; }
   </style>
 </head>
 <body>
-  <h1>🎧 低频噪音分析器：压缩机 & HVAC</h1>
-  <p>实时观察 20–200Hz 低频是否存在持续峰值</p>
-
-  <canvas id="canvas" width="1024" height="400"></canvas>
-
-  <div class="meter">
-    <div class="meter-fill" id="meterFill" style="width: 0%"></div>
-  </div>
-  <div class="volume-label" id="volumeLabel">🔊 音量强度：0 dBFS</div>
-
+  <h1>🎧 高频谱 + 热力图分析器（低频专用）</h1>
+  <canvas id="spectrumCanvas" width="1024" height="400"></canvas>
+  <canvas id="heatmapCanvas" width="1024" height="200"></canvas>
   <div class="controls">
-    <button id="togglePauseBtn">▶️ 开始</button>
-    <button id="resetBtn">⏹️ 重置</button>
-    <button id="toggleScaleBtn">📉 切换X轴缩放</button>
-    <button id="toggleDisplayModeBtn">📊 切换图形显示方式</button>
+    <button id="toggleBtn">▶️ 开始</button>
+    <button id="toggleModeBtn">📊 切换柱状/曲线</button>
+    <button id="toggleScaleBtn">📉 切换线性/对数 X轴</button>
+    <button id="clearBtn">🧹 清空热力图</button>
   </div>
-
   <script>
-    const canvas = document.getElementById("canvas");
-    const ctx = canvas.getContext("2d");
-    const volumeLabel = document.getElementById("volumeLabel");
-    const meterFill = document.getElementById("meterFill");
+    const specCanvas = document.getElementById("spectrumCanvas");
+    const specCtx = specCanvas.getContext("2d");
+    const heatCanvas = document.getElementById("heatmapCanvas");
+    const heatCtx = heatCanvas.getContext("2d");
 
-    let audioCtx, analyser, volumeAnalyser;
-    let dataArray, volumeDataArray, bufferLength, sampleRate;
+    let audioCtx, analyser;
+    let bufferLength, sampleRate;
+    let floatData, avgData;
     let isPaused = true;
     let isLogScale = false;
     let useBarChart = true;
-    let animationIdDraw = null;
-    let animationIdVolume = null;
-    let hoverX = null;
+    let animationId;
+    const smoothingFactor = 0.8;
+    const heatHistory = [];
+    const maxHistory = heatCanvas.height;
 
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      sampleRate = audioCtx.sampleRate;
-      const source = audioCtx.createMediaStreamSource(stream);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      bufferLength = analyser.frequencyBinCount;
-      dataArray = new Uint8Array(bufferLength);
-      volumeAnalyser = audioCtx.createAnalyser();
-      volumeAnalyser.fftSize = 256;
-      volumeDataArray = new Uint8Array(volumeAnalyser.frequencyBinCount);
-      source.connect(analyser);
-      source.connect(volumeAnalyser);
-    });
-
-    canvas.addEventListener("mousemove", (e) => {
-      const rect = canvas.getBoundingClientRect();
-      hoverX = e.clientX - rect.left;
-    });
-
-    canvas.addEventListener("mouseleave", () => {
-      hoverX = null;
-    });
+    function hslToRgb(h, s, l) {
+      let r, g, b;
+      if (s == 0) r = g = b = l;
+      else {
+        const hue2rgb = (p, q, t) => {
+          if (t < 0) t += 1;
+          if (t > 1) t -= 1;
+          if (t < 1/6) return p + (q - p) * 6 * t;
+          if (t < 1/2) return q;
+          if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+          return p;
+        };
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1/3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1/3);
+      }
+      return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+    }
 
     function draw() {
       if (isPaused) return;
-      animationIdDraw = requestAnimationFrame(draw);
-      analyser.getByteFrequencyData(dataArray);
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      animationId = requestAnimationFrame(draw);
+      analyser.getFloatFrequencyData(floatData);
+      for (let i = 0; i < bufferLength; i++) {
+        avgData[i] = smoothingFactor * avgData[i] + (1 - smoothingFactor) * floatData[i];
+      }
 
-      const barWidth = canvas.width / bufferLength;
-      const dBData = new Float32Array(bufferLength);
-      let maxVal = -Infinity;
-      let maxIndex = 0;
+      // 绘制频谱图
+      specCtx.fillStyle = "#000";
+      specCtx.fillRect(0, 0, specCanvas.width, specCanvas.height);
+      const barWidth = specCanvas.width / bufferLength;
+      const peaks = [];
 
       for (let i = 0; i < bufferLength; i++) {
-        dBData[i] = 20 * Math.log10(dataArray[i] / 255 || 0.00001);
-        if (dBData[i] > maxVal) {
-          maxVal = dBData[i];
-          maxIndex = i;
+        const dB = avgData[i];
+        const height = ((dB + 120) / 120) * specCanvas.height;
+        const x = isLogScale
+          ? Math.log10(1 + i) / Math.log10(1 + bufferLength) * specCanvas.width
+          : i * barWidth;
+        const nextX = isLogScale
+          ? Math.log10(1 + i + 1) / Math.log10(1 + bufferLength) * specCanvas.width
+          : (i + 1) * barWidth;
+        if (useBarChart) {
+          specCtx.fillStyle = `hsl(${(i / bufferLength) * 360}, 100%, 50%)`;
+          specCtx.fillRect(x, specCanvas.height - height, nextX - x, height);
+        } else {
+          const y = specCanvas.height - height;
+          if (i === 0) specCtx.beginPath();
+          else specCtx.lineTo(x, y);
         }
+        peaks.push({ index: i, value: dB });
+      }
+      if (!useBarChart) {
+        specCtx.strokeStyle = "#0f0";
+        specCtx.lineWidth = 2;
+        specCtx.stroke();
       }
 
-      if (useBarChart) {
-        for (let i = 0; i < bufferLength; i++) {
-          const dB = dBData[i];
-          const height = ((dB + 120) / 120) * canvas.height;
-          const hue = (i / bufferLength) * 360;
-          const x = isLogScale
-            ? Math.log10(1 + i) / Math.log10(1 + bufferLength) * canvas.width
-            : i * barWidth;
-          const nextX = isLogScale
-            ? Math.log10(1 + i + 1) / Math.log10(1 + bufferLength) * canvas.width
-            : (i + 1) * barWidth;
-          ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
-          ctx.fillRect(x, canvas.height - height, nextX - x, height);
-        }
-      } else {
-        ctx.beginPath();
-        for (let i = 0; i < bufferLength; i++) {
-          const dB = dBData[i];
-          const x = isLogScale
-            ? Math.log10(1 + i) / Math.log10(1 + bufferLength) * canvas.width
-            : i * barWidth;
-          const y = canvas.height - ((dB + 120) / 120) * canvas.height;
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.strokeStyle = "#0f0";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
-
-      // Y轴刻度与网格线
-      ctx.strokeStyle = "#444";
-      ctx.fillStyle = "#ccc";
-      ctx.font = "12px sans-serif";
-      ctx.textAlign = "right";
+      // y轴刻度
+      specCtx.strokeStyle = "#444";
+      specCtx.fillStyle = "#ccc";
+      specCtx.font = "12px sans-serif";
+      specCtx.textAlign = "right";
       for (let dB = 0; dB >= -120; dB -= 20) {
-        const y = canvas.height * (1 - (dB + 120) / 120);
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.moveTo(35, y);
-        ctx.lineTo(canvas.width, y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(8, y);
-        ctx.stroke();
-        ctx.fillText(`${dB}`, 30, y + 4);
+        const y = specCanvas.height * (1 - (dB + 120) / 120);
+        specCtx.setLineDash([4, 4]);
+        specCtx.beginPath();
+        specCtx.moveTo(35, y);
+        specCtx.lineTo(specCanvas.width, y);
+        specCtx.stroke();
+        specCtx.setLineDash([]);
+        specCtx.fillText(`${dB}`, 30, y + 4);
       }
 
-      // X轴频率标注
-      ctx.fillStyle = "#ccc";
-      ctx.textAlign = "left";
+      // x轴刻度
+      specCtx.fillStyle = "#ccc";
+      specCtx.textAlign = "left";
       [50, 100, 300, 1000].forEach(freq => {
         const norm = freq / (sampleRate / 2);
         const bin = norm * bufferLength;
         const x = isLogScale
-          ? Math.log10(1 + bin) / Math.log10(1 + bufferLength) * canvas.width
-          : norm * canvas.width;
-        ctx.beginPath();
-        ctx.moveTo(x, canvas.height - 10);
-        ctx.lineTo(x, canvas.height);
-        ctx.stroke();
-        ctx.fillText(`${freq}Hz`, x + 2, canvas.height - 5);
+          ? Math.log10(1 + bin) / Math.log10(1 + bufferLength) * specCanvas.width
+          : norm * specCanvas.width;
+        specCtx.beginPath();
+        specCtx.moveTo(x, specCanvas.height - 10);
+        specCtx.lineTo(x, specCanvas.height);
+        specCtx.stroke();
+        specCtx.fillText(`${freq}Hz`, x + 2, specCanvas.height - 5);
       });
 
-      // 峰值追踪
-      const peakFreq = maxIndex * (sampleRate / 2) / bufferLength;
-      ctx.strokeStyle = "#ff0";
-      ctx.beginPath();
-      const peakX = isLogScale
-        ? Math.log10(1 + maxIndex) / Math.log10(1 + bufferLength) * canvas.width
-        : maxIndex * barWidth;
-      ctx.moveTo(peakX, 0);
-      ctx.lineTo(peakX, canvas.height);
-      ctx.stroke();
-      ctx.fillStyle = "#ff0";
-      ctx.font = "14px sans-serif";
-      ctx.fillText(`🔺 Peak: ${Math.round(peakFreq)} Hz`, 10, 20);
+      // Top3 peaks
+      peaks.sort((a, b) => b.value - a.value);
+      const top3 = peaks.slice(0, 3);
+      specCtx.fillStyle = "#ff0";
+      specCtx.font = "14px sans-serif";
+      top3.forEach(peak => {
+        const freq = peak.index * sampleRate / 2 / bufferLength;
+        const dB = peak.value;
+        const x = isLogScale
+          ? Math.log10(1 + peak.index) / Math.log10(1 + bufferLength) * specCanvas.width
+          : peak.index * barWidth;
+        const y = specCanvas.height - ((dB + 120) / 120) * specCanvas.height;
+        specCtx.beginPath();
+        specCtx.arc(x, y, 4, 0, 2 * Math.PI);
+        specCtx.fill();
+        specCtx.fillText(`🔺${Math.round(freq)}Hz ${dB.toFixed(1)}dB`, x + 6, y - 6);
+      });
 
-      // 鼠标 hover 信息
-      if (hoverX !== null) {
-        let bin;
-        if (isLogScale) {
-          const logTotal = Math.log10(1 + bufferLength);
-          const ratio = hoverX / canvas.width;
-          const logIndex = ratio * logTotal;
-          bin = Math.pow(10, logIndex) - 1;
-        } else {
-          bin = hoverX / canvas.width * bufferLength;
+      // 热力图更新
+      const row = new Uint8ClampedArray(bufferLength * 4);
+      for (let i = 0; i < bufferLength; i++) {
+        const dB = avgData[i];
+        const norm = Math.max(0, Math.min(1, (dB + 100) / 100));
+        const hue = (1 - norm) * 240;
+        const color = hslToRgb(hue / 360, 1, 0.5);
+        row[i * 4 + 0] = color[0];
+        row[i * 4 + 1] = color[1];
+        row[i * 4 + 2] = color[2];
+        row[i * 4 + 3] = 255;
+      }
+      heatHistory.push(row);
+      if (heatHistory.length > maxHistory) heatHistory.shift();
+
+      const imageData = heatCtx.createImageData(heatCanvas.width, heatHistory.length);
+      for (let y = 0; y < heatHistory.length; y++) {
+        const src = heatHistory[y];
+        for (let x = 0; x < heatCanvas.width; x++) {
+          const norm = x / heatCanvas.width;
+          const bin = isLogScale
+            ? Math.pow(10, norm * Math.log10(1 + bufferLength)) - 1
+            : norm * bufferLength;
+          const idx = Math.min(bufferLength - 1, Math.floor(bin)) * 4;
+          const pixelIndex = (y * heatCanvas.width + x) * 4;
+          imageData.data[pixelIndex + 0] = src[idx + 0];
+          imageData.data[pixelIndex + 1] = src[idx + 1];
+          imageData.data[pixelIndex + 2] = src[idx + 2];
+          imageData.data[pixelIndex + 3] = 255;
         }
-        bin = Math.max(0, Math.min(bufferLength - 1, Math.round(bin)));
-        const freq = bin * (sampleRate / 2) / bufferLength;
-        const dB = 20 * Math.log10(dataArray[bin] / 255 || 0.00001);
-
-        ctx.setLineDash([2, 2]);
-        ctx.beginPath();
-        ctx.moveTo(hoverX, 0);
-        ctx.lineTo(hoverX, canvas.height);
-        ctx.strokeStyle = "#0ff";
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        ctx.fillStyle = "#0ff";
-        ctx.fillText(`📍 ${freq.toFixed(1)} Hz, ${dB.toFixed(1)} dBFS`, 10, 40);
       }
+      heatCtx.putImageData(imageData, 0, heatCanvas.height - heatHistory.length);
     }
 
-    function updateVolume() {
-      if (isPaused) return;
-      animationIdVolume = requestAnimationFrame(updateVolume);
-      volumeAnalyser.getByteTimeDomainData(volumeDataArray);
-      let sum = 0;
-      for (let i = 0; i < volumeDataArray.length; i++) {
-        let val = (volumeDataArray[i] - 128) / 128;
-        sum += val * val;
-      }
-      const rms = Math.sqrt(sum / volumeDataArray.length);
-      const dbfs = 20 * Math.log10(rms || 0.00001);
-      const percent = Math.min(100, ((dbfs + 60) / 60) * 100);
-      meterFill.style.width = `${percent}%`;
-      volumeLabel.textContent = `🔊 音量强度：${dbfs.toFixed(1)} dBFS`;
-    }
-
-    document.getElementById("togglePauseBtn").addEventListener("click", () => {
+    document.getElementById("toggleBtn").addEventListener("click", () => {
       isPaused = !isPaused;
-      const btn = document.getElementById("togglePauseBtn");
-      if (!isPaused) {
-        btn.textContent = "⏸️ 暂停";
-        draw();
-        updateVolume();
-      } else {
-        btn.textContent = "▶️ 开始";
-        cancelAnimationFrame(animationIdDraw);
-        cancelAnimationFrame(animationIdVolume);
-      }
+      document.getElementById("toggleBtn").textContent = isPaused ? "▶️ 开始" : "⏸️ 暂停";
+      if (!isPaused) draw();
+      else cancelAnimationFrame(animationId);
     });
 
-    document.getElementById("resetBtn").addEventListener("click", () => {
-      isPaused = true;
-      document.getElementById("togglePauseBtn").textContent = "▶️ 开始";
-      cancelAnimationFrame(animationIdDraw);
-      cancelAnimationFrame(animationIdVolume);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      meterFill.style.width = `0%`;
-      volumeLabel.textContent = `🔊 音量强度：0 dBFS`;
+    document.getElementById("toggleModeBtn").addEventListener("click", () => {
+      useBarChart = !useBarChart;
     });
 
     document.getElementById("toggleScaleBtn").addEventListener("click", () => {
       isLogScale = !isLogScale;
     });
 
-    document.getElementById("toggleDisplayModeBtn").addEventListener("click", () => {
-      useBarChart = !useBarChart;
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      heatHistory.length = 0;
+      heatCtx.clearRect(0, 0, heatCanvas.width, heatCanvas.height);
+    });
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      sampleRate = audioCtx.sampleRate;
+      const source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 8192;
+      bufferLength = analyser.frequencyBinCount;
+      floatData = new Float32Array(bufferLength);
+      avgData = new Float32Array(bufferLength);
+      source.connect(analyser);
     });
   </script>
 </body>
