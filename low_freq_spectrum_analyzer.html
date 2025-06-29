@@ -1,0 +1,290 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>低频噪音分析器（压缩机 & HVAC）</title>
+  <style>
+    body {
+      background: #111;
+      color: #fff;
+      font-family: sans-serif;
+      text-align: center;
+      margin: 0;
+    }
+    canvas {
+      background: #000;
+      display: block;
+      margin: 0 auto;
+    }
+    .controls {
+      margin-top: 10px;
+    }
+    .meter {
+      width: 300px;
+      height: 20px;
+      background: #333;
+      margin: 1rem auto;
+      position: relative;
+      border-radius: 5px;
+    }
+    .meter-fill {
+      height: 100%;
+      background: limegreen;
+      transition: width 0.1s;
+      border-radius: 5px;
+    }
+    .volume-label {
+      font-size: 14px;
+      margin-top: 5px;
+    }
+    button {
+      margin: 0.5rem;
+      padding: 0.5rem 1rem;
+      background: #333;
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      border-radius: 5px;
+    }
+    button:hover {
+      background: #555;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎧 低频噪音分析器：压缩机 & HVAC</h1>
+  <p>实时观察 20–200Hz 低频是否存在持续峰值</p>
+
+  <canvas id="canvas" width="1024" height="400"></canvas>
+
+  <div class="meter">
+    <div class="meter-fill" id="meterFill" style="width: 0%"></div>
+  </div>
+  <div class="volume-label" id="volumeLabel">🔊 音量强度：0 dBFS</div>
+
+  <div class="controls">
+    <button id="togglePauseBtn">▶️ 开始</button>
+    <button id="resetBtn">⏹️ 重置</button>
+    <button id="toggleScaleBtn">📉 切换X轴缩放</button>
+    <button id="toggleDisplayModeBtn">📊 切换图形显示方式</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const volumeLabel = document.getElementById("volumeLabel");
+    const meterFill = document.getElementById("meterFill");
+
+    let audioCtx, analyser, volumeAnalyser;
+    let dataArray, volumeDataArray, bufferLength, sampleRate;
+    let isPaused = true;
+    let isLogScale = false;
+    let useBarChart = true;
+    let animationIdDraw = null;
+    let animationIdVolume = null;
+    let hoverX = null;
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      sampleRate = audioCtx.sampleRate;
+      const source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      bufferLength = analyser.frequencyBinCount;
+      dataArray = new Uint8Array(bufferLength);
+      volumeAnalyser = audioCtx.createAnalyser();
+      volumeAnalyser.fftSize = 256;
+      volumeDataArray = new Uint8Array(volumeAnalyser.frequencyBinCount);
+      source.connect(analyser);
+      source.connect(volumeAnalyser);
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      hoverX = e.clientX - rect.left;
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+      hoverX = null;
+    });
+
+    function draw() {
+      if (isPaused) return;
+      animationIdDraw = requestAnimationFrame(draw);
+      analyser.getByteFrequencyData(dataArray);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const barWidth = canvas.width / bufferLength;
+      const dBData = new Float32Array(bufferLength);
+      let maxVal = -Infinity;
+      let maxIndex = 0;
+
+      for (let i = 0; i < bufferLength; i++) {
+        dBData[i] = 20 * Math.log10(dataArray[i] / 255 || 0.00001);
+        if (dBData[i] > maxVal) {
+          maxVal = dBData[i];
+          maxIndex = i;
+        }
+      }
+
+      if (useBarChart) {
+        for (let i = 0; i < bufferLength; i++) {
+          const dB = dBData[i];
+          const height = ((dB + 120) / 120) * canvas.height;
+          const hue = (i / bufferLength) * 360;
+          const x = isLogScale
+            ? Math.log10(1 + i) / Math.log10(1 + bufferLength) * canvas.width
+            : i * barWidth;
+          const nextX = isLogScale
+            ? Math.log10(1 + i + 1) / Math.log10(1 + bufferLength) * canvas.width
+            : (i + 1) * barWidth;
+          ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
+          ctx.fillRect(x, canvas.height - height, nextX - x, height);
+        }
+      } else {
+        ctx.beginPath();
+        for (let i = 0; i < bufferLength; i++) {
+          const dB = dBData[i];
+          const x = isLogScale
+            ? Math.log10(1 + i) / Math.log10(1 + bufferLength) * canvas.width
+            : i * barWidth;
+          const y = canvas.height - ((dB + 120) / 120) * canvas.height;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = "#0f0";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Y轴刻度与网格线
+      ctx.strokeStyle = "#444";
+      ctx.fillStyle = "#ccc";
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "right";
+      for (let dB = 0; dB >= -120; dB -= 20) {
+        const y = canvas.height * (1 - (dB + 120) / 120);
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(35, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(8, y);
+        ctx.stroke();
+        ctx.fillText(`${dB}`, 30, y + 4);
+      }
+
+      // X轴频率标注
+      ctx.fillStyle = "#ccc";
+      ctx.textAlign = "left";
+      [50, 100, 300, 1000].forEach(freq => {
+        const norm = freq / (sampleRate / 2);
+        const bin = norm * bufferLength;
+        const x = isLogScale
+          ? Math.log10(1 + bin) / Math.log10(1 + bufferLength) * canvas.width
+          : norm * canvas.width;
+        ctx.beginPath();
+        ctx.moveTo(x, canvas.height - 10);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+        ctx.fillText(`${freq}Hz`, x + 2, canvas.height - 5);
+      });
+
+      // 峰值追踪
+      const peakFreq = maxIndex * (sampleRate / 2) / bufferLength;
+      ctx.strokeStyle = "#ff0";
+      ctx.beginPath();
+      const peakX = isLogScale
+        ? Math.log10(1 + maxIndex) / Math.log10(1 + bufferLength) * canvas.width
+        : maxIndex * barWidth;
+      ctx.moveTo(peakX, 0);
+      ctx.lineTo(peakX, canvas.height);
+      ctx.stroke();
+      ctx.fillStyle = "#ff0";
+      ctx.font = "14px sans-serif";
+      ctx.fillText(`🔺 Peak: ${Math.round(peakFreq)} Hz`, 10, 20);
+
+      // 鼠标 hover 信息
+      if (hoverX !== null) {
+        let bin;
+        if (isLogScale) {
+          const logTotal = Math.log10(1 + bufferLength);
+          const ratio = hoverX / canvas.width;
+          const logIndex = ratio * logTotal;
+          bin = Math.pow(10, logIndex) - 1;
+        } else {
+          bin = hoverX / canvas.width * bufferLength;
+        }
+        bin = Math.max(0, Math.min(bufferLength - 1, Math.round(bin)));
+        const freq = bin * (sampleRate / 2) / bufferLength;
+        const dB = 20 * Math.log10(dataArray[bin] / 255 || 0.00001);
+
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        ctx.moveTo(hoverX, 0);
+        ctx.lineTo(hoverX, canvas.height);
+        ctx.strokeStyle = "#0ff";
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = "#0ff";
+        ctx.fillText(`📍 ${freq.toFixed(1)} Hz, ${dB.toFixed(1)} dBFS`, 10, 40);
+      }
+    }
+
+    function updateVolume() {
+      if (isPaused) return;
+      animationIdVolume = requestAnimationFrame(updateVolume);
+      volumeAnalyser.getByteTimeDomainData(volumeDataArray);
+      let sum = 0;
+      for (let i = 0; i < volumeDataArray.length; i++) {
+        let val = (volumeDataArray[i] - 128) / 128;
+        sum += val * val;
+      }
+      const rms = Math.sqrt(sum / volumeDataArray.length);
+      const dbfs = 20 * Math.log10(rms || 0.00001);
+      const percent = Math.min(100, ((dbfs + 60) / 60) * 100);
+      meterFill.style.width = `${percent}%`;
+      volumeLabel.textContent = `🔊 音量强度：${dbfs.toFixed(1)} dBFS`;
+    }
+
+    document.getElementById("togglePauseBtn").addEventListener("click", () => {
+      isPaused = !isPaused;
+      const btn = document.getElementById("togglePauseBtn");
+      if (!isPaused) {
+        btn.textContent = "⏸️ 暂停";
+        draw();
+        updateVolume();
+      } else {
+        btn.textContent = "▶️ 开始";
+        cancelAnimationFrame(animationIdDraw);
+        cancelAnimationFrame(animationIdVolume);
+      }
+    });
+
+    document.getElementById("resetBtn").addEventListener("click", () => {
+      isPaused = true;
+      document.getElementById("togglePauseBtn").textContent = "▶️ 开始";
+      cancelAnimationFrame(animationIdDraw);
+      cancelAnimationFrame(animationIdVolume);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      meterFill.style.width = `0%`;
+      volumeLabel.textContent = `🔊 音量强度：0 dBFS`;
+    });
+
+    document.getElementById("toggleScaleBtn").addEventListener("click", () => {
+      isLogScale = !isLogScale;
+    });
+
+    document.getElementById("toggleDisplayModeBtn").addEventListener("click", () => {
+      useBarChart = !useBarChart;
+    });
+  </script>
+</body>
+</html>
